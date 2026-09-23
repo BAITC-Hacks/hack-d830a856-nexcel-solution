@@ -8,6 +8,7 @@ except ModuleNotFoundError:
     from agents.orchestrator import ForecastOrchestrator
 
 LOGGER = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 CUSTOM_CSS = r"""
 :root {

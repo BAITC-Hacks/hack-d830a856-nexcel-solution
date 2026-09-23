@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]
 API_URL: Final = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 MODEL_NAME: Final = "ecmwf_ifs"
 DEFAULT_CACHE_DIR: Final = PROJECT_ROOT / "data" / "weather_cache"
+TURBINE_CONFIG_PATH: Final = PROJECT_ROOT / "data" / "turbines.json"
 WEATHER_VARIABLES: Final = (
     "wind_speed_10m",
     "wind_speed_80m",
@@ -24,10 +26,35 @@ WEATHER_VARIABLES: Final = (
     "wind_direction_100m",
     "temperature_2m",
 )
-TURBINE_COORDINATES: Final = {
-    1: (43.643194, 78.538833),
-    2: (43.645139, 78.535611),
-}
+
+def _load_turbine_coordinates() -> dict[int, tuple[float, float]]:
+    """Load the two weather coordinates from the project data configuration."""
+    try:
+        config = json.loads(TURBINE_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Unable to read turbine configuration: {TURBINE_CONFIG_PATH}"
+        ) from exc
+
+    coordinates: dict[int, tuple[float, float]] = {}
+    for turbine_id in (1, 2):
+        turbine = config.get(f"turbine_{turbine_id}")
+        if not isinstance(turbine, dict):
+            raise TypeError(f"Configuration is missing turbine_{turbine_id}")
+        latitude = turbine.get("lat")
+        longitude = turbine.get("lon")
+        if not isinstance(latitude, (int, float)) or not isinstance(
+            longitude,
+            (int, float),
+        ):
+            raise TypeError(
+                f"Configuration has invalid coordinates for turbine {turbine_id}"
+            )
+        coordinates[turbine_id] = (float(latitude), float(longitude))
+    return coordinates
+
+
+TURBINE_COORDINATES: Final = _load_turbine_coordinates()
 
 
 class HistoricalWeatherService:

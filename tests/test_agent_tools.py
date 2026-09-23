@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import joblib
@@ -91,6 +92,75 @@ class AgentToolTests(unittest.TestCase):
             '{"value": 42}',
         )
         self.assertEqual(json.loads(result), {"value": 42})
+
+    def test_orchestrator_runs_weather_then_model(self) -> None:
+        """Exercise the full bounded loop without an API key or network."""
+        weather_result = {"weather_data": [{"timestamp": "2026-01-01T00:00:00Z"}]}
+        model_result = {"forecast": [{"predicted_power": 0.5}]}
+        phase = {"value": 0}
+
+        class FakeMessage:
+            def __init__(
+                self,
+                content: str | None = None,
+                tool_calls: list[object] | None = None,
+            ) -> None:
+                self.content = content
+                self.tool_calls = tool_calls or []
+
+            def model_dump(self, exclude_none: bool = True) -> dict[str, str | None]:
+                return {"role": "assistant", "content": self.content}
+
+        def create(**kwargs: object) -> SimpleNamespace:
+            value = phase["value"]
+            phase["value"] += 1
+            if value == 0:
+                call = SimpleNamespace(
+                    id="weather",
+                    function=SimpleNamespace(
+                        name="get_weather_tool",
+                        arguments='{"turbine_id": 1, "target_date": "2026-01-01"}',
+                    ),
+                )
+                message = FakeMessage(tool_calls=[call])
+            elif value == 1:
+                messages = kwargs["messages"]
+                assert isinstance(messages, list)
+                weather = json.loads(messages[-1]["content"])
+                call = SimpleNamespace(
+                    id="model",
+                    function=SimpleNamespace(
+                        name="run_model_tool",
+                        arguments=json.dumps({"weather_data": weather["weather_data"]}),
+                    ),
+                )
+                message = FakeMessage(tool_calls=[call])
+            else:
+                message = FakeMessage(content="forecast complete")
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        orchestrator = ForecastOrchestrator()
+        orchestrator.client = client
+        with (
+            patch(
+                "src.agents.orchestrator.get_weather_tool",
+                return_value=weather_result,
+            ) as get_weather,
+            patch(
+                "src.agents.orchestrator.run_model_tool",
+                return_value=model_result,
+            ) as run_model,
+        ):
+            output = orchestrator._run_tool_loop(
+                [{"role": "user", "content": "forecast"}]
+            )
+
+        self.assertEqual(output, "forecast complete")
+        get_weather.assert_called_once()
+        run_model.assert_called_once_with(weather_data=weather_result["weather_data"])
 
 
 if __name__ == "__main__":
