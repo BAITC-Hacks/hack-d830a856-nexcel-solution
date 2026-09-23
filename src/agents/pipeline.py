@@ -381,36 +381,3 @@ class ForecastAgent:
             }
         return rerun
 
-
-STATUS_ICONS: Final = {"ok": "✅", "warn": "⚠️", "error": "❌", "info": "ℹ️"}
-
-
-def activity_markdown(result: ForecastResult) -> str:
-    """Render real pipeline stages and validation checks for the UI."""
-    lines = [
-        f"**Выпуск {result.issue_date} · {result.horizon_hours} ч · турбины {list(result.turbine_ids)} · "
-        f"{STATUS_ICONS[result.status]} {result.status}**",
-        "",
-        "| # | Этап | | Детали | мс |",
-        "|---|---|---|---|---|",
-    ]
-    for index, step in enumerate(result.steps, start=1):
-        detail = str(step["detail"]).replace("|", "/")
-        lines.append(f"| {index} | {step['stage']} | {STATUS_ICONS[step['status']]} | {detail} | {step['ms']} |")
-    if result.checks:
-        lines += ["", "**Проверки**", ""]
-        lines += [f"- {STATUS_ICONS[c['status']]} `{c['name']}` — {c['detail']}" for c in result.checks]
-    if result.changes:
-        lines += ["", f"**Изменения:** `{result.changes}`"]
-    return "\n".join(lines)
-
-
-def plot_frame(result: ForecastResult | None) -> pd.DataFrame:
-    """Long-format frame for gr.LinePlot, one line per turbine."""
-    if result is None or result.forecast is None:
-        return pd.DataFrame({"target_time": pd.Series(dtype="datetime64[ns]"),
-                             "predicted_power": pd.Series(dtype=float), "turbine": pd.Series(dtype=str)})
-    frame = result.forecast.loc[:, ["target_time", "turbine_id", "predicted_power"]].copy()
-    frame["target_time"] = frame["target_time"].dt.tz_localize(None)
-    frame["turbine"] = "Турбина " + frame["turbine_id"].astype(str)
-    return frame.drop(columns="turbine_id")

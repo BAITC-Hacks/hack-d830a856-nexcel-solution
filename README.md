@@ -11,7 +11,7 @@
 
 ## Демо
 
-TODO: добавить GIF или скриншот Gradio-интерфейса после записи сквозного
+TODO: добавить GIF или скриншот HTML-консоли после записи сквозного
 сценария.
 
 ## SMART goal
@@ -26,7 +26,7 @@ T: к демо готов локальный пайплайн; walk-forward за
 ## Architecture
 
 SCADA XLSX/CSV → почасовой train set → архивная погода ECMWF IFS → физические
-признаки → LightGBM → agent tools → LLM-ответ → Gradio UI
+признаки → LightGBM → agent tools → LLM-ответ → FastAPI + HTML-консоль
 
 ## Quickstart
 
@@ -34,7 +34,7 @@ SCADA XLSX/CSV → почасовой train set → архивная погод�
 2. .venv\Scripts\Activate.ps1
 3. python -m pip install -r requirements.txt
 4. python -m src.train.train_model
-5. python -m src.app
+5. python -m src.app  (открыть http://127.0.0.1:7860)
 
 Первый запуск обучения создаёт data/weather_cache/ и models/wind_power_lgb.pkl.
 Для повторного обучения только из кэша используйте:
