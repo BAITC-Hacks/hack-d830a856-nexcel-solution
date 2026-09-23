@@ -1,0 +1,5 @@
+# зависимости добавляем по ходу
+pydantic
+openai
+gradio
+python-dotenv
