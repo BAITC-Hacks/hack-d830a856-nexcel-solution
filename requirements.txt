@@ -1,7 +1,8 @@
 # зависимости добавляем по ходу
 pydantic
 openai
-gradio
+fastapi>=0.110
+uvicorn>=0.29
 python-dotenv
 
 # данные / модель / ML-пайплайн

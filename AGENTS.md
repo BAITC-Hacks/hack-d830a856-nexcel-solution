@@ -18,7 +18,7 @@ walk-forward (на каждую дату — только архивные пр�
 - `src/weather/` — клиент архивных прогнозов погоды по координатам (+ mock-клиент для офлайн-демо).
 - `src/agents/` — LLM-оркестратор и его tool-schemas (`orchestrator.py`, `tools.py`). LLM только вызывает
   инструменты и объясняет результат, сам числа не считает и не придумывает (см. `docs/skills/skill-agentic-loop.md`).
-- `src/app.py` — Gradio demo UI.
+- `src/app.py` — FastAPI (`/api/forecast`, `/api/update`, `/api/chat`, `/api/status`) + HTML-консоль `src/web/index.html`.
 - `src/backtest.py` — walk-forward прогон по тестовому периоду Feb 2026, это и есть метрика оценки.
 
 ## Роли в команде
