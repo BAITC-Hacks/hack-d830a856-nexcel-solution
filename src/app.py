@@ -1,11 +1,16 @@
+import html
 import logging
+from datetime import date
+from functools import partial
 
 import gradio as gr
 
 try:
     from src.agents.orchestrator import ForecastOrchestrator
+    from src.agents.pipeline import ForecastResult, activity_markdown, plot_frame
 except ModuleNotFoundError:
     from agents.orchestrator import ForecastOrchestrator
+    from agents.pipeline import ForecastResult, activity_markdown, plot_frame
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -89,6 +94,7 @@ body, .gradio-container {
 #dashboard-layout { align-items: stretch !important; }
 
 .dashboard-panel {
+    height: 100%;
     min-height: 630px;
     overflow: hidden !important;
     border: 1px solid var(--border) !important;
@@ -227,7 +233,19 @@ body, .gradio-container {
     font-size: 12px;
 }
 
-#forecast-plot { display: none !important; }
+#forecast-controls {
+    gap: 8px !important;
+    padding: 14px 18px 0 !important;
+    align-items: end !important;
+}
+
+#forecast-chart { margin: 12px 18px 0 !important; }
+
+#agent-activity {
+    margin: 0 18px 18px !important;
+    color: var(--muted);
+    font-size: 12px;
+}
 
 .metrics-grid {
     display: grid;
@@ -299,14 +317,38 @@ FORECAST_PLACEHOLDER_HTML = """
 </div>
 """
 
-METRICS_HTML = """
-<div class="metrics-grid">
-    <div class="metric-card"><div class="metric-label">Горизонт</div><div class="metric-value">48 часов</div></div>
-    <div class="metric-card"><div class="metric-label">Модель</div><div class="metric-value">Forecast Model</div></div>
-    <div class="metric-card"><div class="metric-label">Погода</div><div class="metric-value">Weather API</div></div>
-    <div class="metric-card"><div class="metric-label">Статус</div><div class="metric-value">Ready</div></div>
-</div>
-"""
+TURBINE_CHOICES = {"Турбина 1": (1,), "Турбина 2": (2,), "Обе турбины": (1, 2)}
+DEFAULT_ISSUE_DATE = "2026-01-31"
+ACTIVITY_PLACEHOLDER = "Этапы агента появятся после построения прогноза."
+
+
+def _metric_card(label: str, value: str) -> str:
+    return (
+        f'<div class="metric-card"><div class="metric-label">{html.escape(label)}</div>'
+        f'<div class="metric-value">{html.escape(value)}</div></div>'
+    )
+
+
+def metrics_html(result: ForecastResult | None) -> str:
+    """Real metrics of the latest forecast; nothing hardcoded."""
+    if result is None:
+        cards = [_metric_card("Статус", "Прогноз не построен")]
+    else:
+        metrics = (result.model_info or {}).get("validation_metrics") or {}
+        mae = f"MAE {metrics['mae']:.3f}" if "mae" in metrics else "нет метрик"
+        cards = [
+            _metric_card("Выпуск · горизонт", f"{result.issue_date} · {result.horizon_hours} ч"),
+            _metric_card("Статус", result.status),
+            _metric_card("Модель (январь 2026)", mae if result.model_info else "не загружена"),
+        ]
+        for name, stats in result.turbines.items():
+            cards.append(_metric_card(
+                name.replace("turbine_", "Турбина "),
+                f"средн. {stats['mean_power']:.2f} · пик {stats['peak_power']:.2f} "
+                f"в {stats['peak_time_utc'][5:16].replace('T', ' ')} UTC",
+            ))
+    return f'<div class="metrics-grid">{"".join(cards)}</div>'
+
 
 INITIAL_HISTORY = [
     {
@@ -319,21 +361,51 @@ INITIAL_HISTORY = [
 ]
 
 orchestrator = ForecastOrchestrator()
+agent = orchestrator.agent  # one ForecastAgent for the button and the chat tools
+NO_CHANGE = (gr.update(), gr.update(), gr.update(), gr.update())
 
 
-def send_message(message: str, history: list):
+def forecast_views(result: ForecastResult | None):
+    """Plot, placeholder, activity and metrics for a forecast result."""
+    has_forecast = result is not None and result.forecast is not None
+    return (
+        gr.update(value=plot_frame(result), visible=has_forecast),
+        gr.update(visible=not has_forecast),
+        activity_markdown(result) if result else ACTIVITY_PLACEHOLDER,
+        metrics_html(result),
+    )
+
+
+def build_forecast(issue_date: str, turbines: str, horizon: str, *, update_only: bool = False):
+    """Direct path without LLM: Gradio -> ForecastAgent -> plot/metrics."""
+    try:
+        parsed_date = date.fromisoformat(issue_date.strip())
+    except ValueError:
+        error = f"❌ Дата должна быть в формате YYYY-MM-DD, получено: `{issue_date}`"
+        return gr.update(), gr.update(), gr.update(), error, gr.update()
+    method = agent.check_update if update_only else agent.run
+    result = method(parsed_date, int(horizon), TURBINE_CHOICES[turbines])
+    return result.summary(), *forecast_views(result)
+
+
+def send_message(message: str, history: list, forecast_context: dict | None):
     history = list(history or [])
     if not message.strip():
-        return history, ""
+        return history, "", forecast_context, *NO_CHANGE
 
+    before = agent.last_result
     history.append({"role": "user", "content": message})
     try:
-        answer = orchestrator.chat(message, history[:-1])
+        answer = orchestrator.chat(message, history[:-1], forecast_context)
     except (OSError, RuntimeError, TypeError, ValueError) as error:
         LOGGER.exception("Unable to process chat message")
         answer = f"Ошибка: {error}"
     history.append({"role": "assistant", "content": answer})
-    return history, ""
+
+    result = agent.last_result
+    if result is before:  # the chat answered without building a new forecast
+        return history, "", forecast_context, *NO_CHANGE
+    return history, "", result.summary(), *forecast_views(result)
 
 
 with gr.Blocks(title="NEXCEL Wind AI") as demo:
@@ -356,7 +428,7 @@ with gr.Blocks(title="NEXCEL Wind AI") as demo:
                 )
 
         with gr.Row(elem_id="dashboard-layout", equal_height=True):
-            with gr.Column(scale=7, min_width=400):  # noqa: SIM117
+            with gr.Column(scale=1, min_width=400):  # noqa: SIM117
                 with gr.Group(elem_classes="dashboard-panel"):
                     gr.HTML(CHAT_HEADER_HTML)
                     chatbot = gr.Chatbot(
@@ -385,17 +457,48 @@ with gr.Blocks(title="NEXCEL Wind AI") as demo:
                             scale=1,
                         )
 
-            with gr.Column(scale=5, min_width=350):  # noqa: SIM117
+            with gr.Column(scale=1, min_width=400):  # noqa: SIM117
                 with gr.Group(elem_classes="dashboard-panel"):
                     gr.HTML(FORECAST_HEADER_HTML)
-                    forecast_plot = gr.Plot(value=None, show_label=False, elem_id="forecast-plot")
-                    gr.HTML(FORECAST_PLACEHOLDER_HTML)
-                    gr.HTML(METRICS_HTML)
+                    with gr.Row(elem_id="forecast-controls"):
+                        issue_date = gr.Textbox(value=DEFAULT_ISSUE_DATE, label="Дата выпуска", scale=2)
+                        turbines = gr.Dropdown(
+                            list(TURBINE_CHOICES), value="Обе турбины", label="Турбины", scale=2
+                        )
+                        horizon = gr.Radio(["24", "48"], value="48", label="Горизонт, ч", scale=2)
+                    with gr.Row(elem_classes="quick-actions"):
+                        forecast_button = gr.Button("Построить прогноз", variant="primary")
+                        update_button = gr.Button("Проверить обновление погоды", elem_classes="quick-action")
+                    forecast_plot = gr.LinePlot(
+                        value=plot_frame(None),
+                        x="target_time",
+                        y="predicted_power",
+                        color="turbine",
+                        y_lim=[0, 1],
+                        x_title="Время, UTC",
+                        y_title="Нормализованная мощность",
+                        show_label=False,
+                        visible=False,
+                        elem_id="forecast-chart",
+                    )
+                    placeholder = gr.HTML(FORECAST_PLACEHOLDER_HTML)
+                    metrics = gr.HTML(metrics_html(None))
+                    activity = gr.Markdown(ACTIVITY_PLACEHOLDER, elem_id="agent-activity")
 
-    send_button.click(send_message, inputs=[textbox, chatbot], outputs=[chatbot, textbox])
-    textbox.submit(send_message, inputs=[textbox, chatbot], outputs=[chatbot, textbox])
-    quick_24.click(lambda: "Построй прогноз выработки ВЭС на 24 часа", outputs=textbox)
-    quick_48.click(lambda: "Построй прогноз выработки ВЭС на 48 часов", outputs=textbox)
+    forecast_state = gr.State(None)
+    views = [forecast_plot, placeholder, activity, metrics]
+
+    chat_inputs = [textbox, chatbot, forecast_state]
+    chat_outputs = [chatbot, textbox, forecast_state, *views]
+    send_button.click(send_message, inputs=chat_inputs, outputs=chat_outputs)
+    textbox.submit(send_message, inputs=chat_inputs, outputs=chat_outputs)
+    forecast_inputs = [issue_date, turbines, horizon]
+    forecast_button.click(build_forecast, inputs=forecast_inputs, outputs=[forecast_state, *views])
+    update_button.click(
+        partial(build_forecast, update_only=True), inputs=forecast_inputs, outputs=[forecast_state, *views]
+    )
+    quick_24.click(lambda d: f"Построй прогноз обеих турбин на 24 часа от {d}", inputs=issue_date, outputs=textbox)
+    quick_48.click(lambda d: f"Построй прогноз обеих турбин на 48 часов от {d}", inputs=issue_date, outputs=textbox)
     quick_model.click(lambda: "Покажи состояние модели прогноза", outputs=textbox)
 
 

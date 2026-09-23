@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 
 try:
-    from src.tools.inference_tool import WindPowerPredictor
+    from src.agents.pipeline import ALLOWED_HORIZONS, TURBINE_IDS, ForecastAgent
     from src.tools.weather_tool import HistoricalWeatherService
 except ModuleNotFoundError:
-    from tools.inference_tool import WindPowerPredictor
+    from agents.pipeline import ALLOWED_HORIZONS, TURBINE_IDS, ForecastAgent
     from tools.weather_tool import HistoricalWeatherService
 
 MAX_FORECAST_HORIZON_HOURS = 48
@@ -21,7 +21,10 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_weather_tool",
-            "description": "Получить архивный прогноз погоды по координатам турбины на дату",
+            "description": (
+                "Только для вопросов про погоду: почасовой архивный прогноз погоды "
+                "по координатам одной турбины. Для прогноза мощности не используй."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -51,21 +54,50 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "run_model_tool",
-            "description": "Запустить модель прогноза мощности по погодным данным",
+            "name": "run_forecast_cycle",
+            "description": (
+                "Главный инструмент прогноза. Сам получает архивный прогноз погоды, "
+                "готовит признаки, запускает модель, проверяет результат и сравнивает "
+                "с прогнозом от предыдущей даты. Возвращает компактную сводку по каждой "
+                "турбине. Прогноз от даты D покрывает часы с D+1 00:00 UTC."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "weather_data": {
+                    "issue_date": {
+                        "type": "string",
+                        "description": "Дата выпуска прогноза, YYYY-MM-DD.",
+                    },
+                    "horizon_hours": {"type": "integer", "enum": list(ALLOWED_HORIZONS)},
+                    "turbine_ids": {
                         "type": "array",
-                        "description": (
-                            "Массив weather_data, который вернул get_weather_tool. "
-                            "Передавай его без изменения."
-                        ),
-                        "items": {"type": "object"},
-                    }
+                        "items": {"type": "integer", "enum": list(TURBINE_IDS)},
+                        "description": "Турбины; по умолчанию обе.",
+                    },
                 },
-                "required": ["weather_data"],
+                "required": ["issue_date", "horizon_hours"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_weather_update",
+            "description": (
+                "Заново скачать погоду для уже построенного прогноза. Если входные "
+                "данные изменились — пересчитать и вернуть, что изменилось."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "issue_date": {"type": "string", "description": "YYYY-MM-DD"},
+                    "horizon_hours": {"type": "integer", "enum": list(ALLOWED_HORIZONS)},
+                    "turbine_ids": {
+                        "type": "array",
+                        "items": {"type": "integer", "enum": list(TURBINE_IDS)},
+                    },
+                },
+                "required": ["issue_date", "horizon_hours"],
             },
         },
     },
@@ -134,28 +166,31 @@ def get_weather_tool(
     }
 
 
-def run_model_tool(
-    weather_data: list[dict[str, Any]] | dict[str, Any],
-) -> dict[str, Any]:
-    """Run local model inference for weather returned by get_weather_tool."""
-    records = (
-        weather_data.get("weather_data")
-        if isinstance(weather_data, dict)
-        else weather_data
-    )
-    if not isinstance(records, list):
-        raise TypeError("weather_data must be a list of hourly weather records")
+def _parse_turbine_ids(turbine_ids: list[int | str] | None) -> tuple[int, ...]:
+    if turbine_ids is None:
+        return TURBINE_IDS
+    if not isinstance(turbine_ids, list) or not turbine_ids:
+        raise TypeError("turbine_ids must be a non-empty list of 1 and/or 2")
+    return tuple(sorted({_parse_turbine_id(turbine_id) for turbine_id in turbine_ids}))
 
-    predictor = WindPowerPredictor()
-    predictions = predictor.predict(pd.DataFrame(records))
-    predictions["timestamp"] = predictions["timestamp"].dt.strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-    model_metadata = predictor.metadata()
-    return {
-        "model": {
-            "objective": model_metadata["objective"],
-            "validation_metrics": model_metadata["validation_metrics"],
-        },
-        "forecast": predictions.to_dict(orient="records"),
-    }
+
+def run_forecast_cycle(
+    agent: ForecastAgent,
+    issue_date: str,
+    horizon_hours: int,
+    turbine_ids: list[int | str] | None = None,
+) -> dict[str, Any]:
+    """Run the whole pipeline in Python and return only its compact summary."""
+    result = agent.run(date.fromisoformat(issue_date), int(horizon_hours), _parse_turbine_ids(turbine_ids))
+    return result.summary()
+
+
+def check_weather_update(
+    agent: ForecastAgent,
+    issue_date: str,
+    horizon_hours: int,
+    turbine_ids: list[int | str] | None = None,
+) -> dict[str, Any]:
+    """Recompute only if the archived weather changed since the last run."""
+    result = agent.check_update(date.fromisoformat(issue_date), int(horizon_hours), _parse_turbine_ids(turbine_ids))
+    return result.summary()
