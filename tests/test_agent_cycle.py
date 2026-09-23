@@ -15,6 +15,7 @@ from src.agents.orchestrator import MAX_TOOL_ROUNDS, ForecastOrchestrator
 from src.agents.pipeline import ForecastAgent
 from src.tools.feature_tool import MODEL_FEATURE_COLUMNS
 from src.tools.inference_tool import WindPowerPredictor
+from src.tools.weather_tool import AS_OF_BASE_VARIABLES, MAX_LEAD_DAYS
 
 STAGES = ["context", "weather", "features", "model", "validation"]
 
@@ -51,7 +52,15 @@ class FakeWeatherService:
             "temperature_2m": -5.0,
             "turbine_id": turbine_id,
         })
-        return frame.iloc[self.drop_hours:].reset_index(drop=True)
+        for lead_day in range(MAX_LEAD_DAYS + 1):
+            suffix = "" if lead_day == 0 else f"_previous_day{lead_day}"
+            for variable in AS_OF_BASE_VARIABLES:
+                frame[f"{variable}{suffix}"] = frame[variable]
+        target_start = pd.Timestamp(start_date, tz="UTC") + timedelta(days=1)
+        missing = (frame["timestamp"] >= target_start) & (
+            frame["timestamp"] < target_start + timedelta(hours=self.drop_hours)
+        )
+        return frame.loc[~missing].reset_index(drop=True)
 
 
 @pytest.fixture
@@ -163,7 +172,7 @@ def test_incomplete_weather_fails_loud(model_path, tmp_path):
 
     assert result.status == "error"
     assert result.steps[-1]["stage"] == "weather"
-    assert "21/24" in result.steps[-1]["detail"]
+    assert "Incomplete as-of forecast" in result.steps[-1]["detail"]
 
 
 def _message(content=None, tool_calls=None):

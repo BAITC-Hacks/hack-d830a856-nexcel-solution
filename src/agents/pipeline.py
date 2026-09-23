@@ -10,27 +10,54 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Callable, Final
+from typing import Any, Final
 
 import pandas as pd
+import requests
 
 try:
-    from src.tools.feature_tool import MODEL_FEATURE_COLUMNS, RAW_WEATHER_COLUMNS, add_physical_features
-    from src.tools.inference_tool import PROJECT_ROOT, SHUTDOWN_WIND_SPEED_MPS, WindPowerPredictor
-    from src.tools.weather_tool import MODEL_NAME, HistoricalWeatherService
+    from src.tools.feature_tool import (
+        MODEL_FEATURE_COLUMNS,
+        RAW_WEATHER_COLUMNS,
+        add_physical_features,
+    )
+    from src.tools.inference_tool import (
+        PROJECT_ROOT,
+        SHUTDOWN_WIND_SPEED_MPS,
+        WindPowerPredictor,
+    )
+    from src.tools.weather_tool import (
+        PREVIOUS_RUNS_MODEL,
+        HistoricalWeatherService,
+        get_forecast_as_of,
+    )
 except ModuleNotFoundError:
-    from tools.feature_tool import MODEL_FEATURE_COLUMNS, RAW_WEATHER_COLUMNS, add_physical_features
-    from tools.inference_tool import PROJECT_ROOT, SHUTDOWN_WIND_SPEED_MPS, WindPowerPredictor
-    from tools.weather_tool import MODEL_NAME, HistoricalWeatherService
+    from tools.feature_tool import (
+        MODEL_FEATURE_COLUMNS,
+        RAW_WEATHER_COLUMNS,
+        add_physical_features,
+    )
+    from tools.inference_tool import (
+        PROJECT_ROOT,
+        SHUTDOWN_WIND_SPEED_MPS,
+        WindPowerPredictor,
+    )
+    from tools.weather_tool import (
+        PREVIOUS_RUNS_MODEL,
+        HistoricalWeatherService,
+        get_forecast_as_of,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
 TURBINE_IDS: Final = (1, 2)
 ALLOWED_HORIZONS: Final = (24, 48)
 DEFAULT_OUTPUT_DIR: Final = PROJECT_ROOT / "outputs" / "forecasts"
+ISSUE_HOUR_UTC: Final = 12
 
 # Validation thresholds (assumptions: no turbine passport available).
 LOW_WIND_MPS: Final = 3.0
@@ -100,7 +127,7 @@ def compare_forecasts(new: pd.DataFrame, old: pd.DataFrame) -> dict[str, Any] | 
     diff = (merged["predicted_power"] - merged["predicted_power_old"]).abs()
     worst = merged.loc[diff.idxmax()]
     return {
-        "hours_compared": int(len(merged)),
+        "hours_compared": len(merged),
         "mean_abs_diff": round(float(diff.mean()), 3),
         "max_abs_diff": round(float(diff.max()), 3),
         "max_diff_time_utc": worst["target_time"].isoformat(),
@@ -185,7 +212,7 @@ class ForecastAgent:
         predictor: WindPowerPredictor | None = None,
         output_dir: Path = DEFAULT_OUTPUT_DIR,
     ) -> None:
-        self.weather_service = weather_service or HistoricalWeatherService()
+        self.weather_service = weather_service
         self.predictor = predictor or WindPowerPredictor()
         self.output_dir = output_dir
         self.results: dict[tuple[date, int, tuple[int, ...]], ForecastResult] = {}
@@ -224,10 +251,34 @@ class ForecastAgent:
         self, result: ForecastResult, *, force_refresh: bool = False
     ) -> tuple[pd.DataFrame, str]:
         window = target_window(result.issue_date, result.horizon_hours)
+        issue_time = pd.Timestamp(result.issue_date, tz="UTC") + pd.Timedelta(hours=ISSUE_HOUR_UTC)
+        fetch_hours = int((window[-1] - issue_time) / pd.Timedelta(hours=1))
         frames = []
         for turbine_id in result.turbine_ids:
-            kwargs = {"force_refresh": True} if force_refresh else {}
-            weather = self.weather_service.get_weather(turbine_id, window[0].date(), window[-1].date(), **kwargs)
+            try:
+                weather = get_forecast_as_of(
+                    turbine_id,
+                    issue_time,
+                    fetch_hours,
+                    offline=False,
+                    service=self.weather_service,
+                    force_refresh=force_refresh,
+                )
+            except (requests.RequestException, OSError) as error:
+                started = time.perf_counter()
+                weather = get_forecast_as_of(
+                    turbine_id,
+                    issue_time,
+                    fetch_hours,
+                    offline=True,
+                    service=self.weather_service,
+                )
+                result.steps.append({
+                    "stage": "weather_fallback_cache",
+                    "status": "ok",
+                    "detail": f"{type(error).__name__}: использован локальный кэш",
+                    "ms": round((time.perf_counter() - started) * 1000),
+                })
             weather = weather.loc[weather["timestamp"].isin(window)]
             complete = weather.dropna(subset=list(RAW_WEATHER_COLUMNS))
             if len(complete) != len(window):
@@ -237,7 +288,10 @@ class ForecastAgent:
             frames.append(weather)
         weather = pd.concat(frames, ignore_index=True).sort_values(["turbine_id", "timestamp"], kind="stable")
         weather = weather.reset_index(drop=True)
-        return weather, f"{MODEL_NAME}: {len(weather)} часовых строк без пропусков, хэш {weather_hash(weather)}"
+        return weather, (
+            f"{PREVIOUS_RUNS_MODEL}: {len(weather)} часовых строк без пропусков, "
+            f"хэш {weather_hash(weather)}"
+        )
 
     @staticmethod
     def _features(weather: pd.DataFrame) -> tuple[pd.DataFrame, str]:
@@ -334,7 +388,7 @@ class ForecastAgent:
             featured = self._step(result, "features", lambda: self._features(weather))
             result.forecast = self._step(result, "model", lambda: self._model(result, featured))
             self._step(result, "validation", lambda: self._validation(result))
-        except Exception:
+        except Exception:  # noqa: BLE001 - failures are recorded by _step for the UI
             result.status = "error"
         else:
             if any(check["status"] == "warn" for check in result.checks):
@@ -359,7 +413,7 @@ class ForecastAgent:
         probe = ForecastResult(issue_date=issue_date, horizon_hours=horizon_hours, turbine_ids=turbine_ids)
         try:
             fresh = self._step(probe, "weather_update", lambda: self._fetch_weather(probe, force_refresh=True))
-        except Exception:
+        except Exception:  # noqa: BLE001 - retain the last valid forecast on update failure
             previous.steps.extend(probe.steps)
             self.last_result = previous
             return previous
@@ -388,8 +442,10 @@ STATUS_ICONS: Final = {"ok": "✅", "warn": "⚠️", "error": "❌", "info": "�
 def activity_markdown(result: ForecastResult) -> str:
     """Render real pipeline stages and validation checks for the UI."""
     lines = [
-        f"**Выпуск {result.issue_date} · {result.horizon_hours} ч · турбины {list(result.turbine_ids)} · "
-        f"{STATUS_ICONS[result.status]} {result.status}**",
+        (
+            f"**Выпуск {result.issue_date} · {result.horizon_hours} ч · турбины {list(result.turbine_ids)} · "
+            f"{STATUS_ICONS[result.status]} {result.status}**"
+        ),
         "",
         "| # | Этап | | Детали | мс |",
         "|---|---|---|---|---|",
