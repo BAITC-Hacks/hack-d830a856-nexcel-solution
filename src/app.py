@@ -1,7 +1,13 @@
+import logging
+
 import gradio as gr
 
-from agents.orchestrator import ForecastOrchestrator
+try:
+    from src.agents.orchestrator import ForecastOrchestrator
+except ModuleNotFoundError:
+    from agents.orchestrator import ForecastOrchestrator
 
+LOGGER = logging.getLogger(__name__)
 
 CUSTOM_CSS = r"""
 :root {
@@ -322,7 +328,8 @@ def send_message(message: str, history: list):
     history.append({"role": "user", "content": message})
     try:
         answer = orchestrator.chat(message, history[:-1])
-    except Exception as error:
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        LOGGER.exception("Unable to process chat message")
         answer = f"Ошибка: {error}"
     history.append({"role": "assistant", "content": answer})
     return history, ""
@@ -348,7 +355,7 @@ with gr.Blocks(title="NEXCEL Wind AI") as demo:
                 )
 
         with gr.Row(elem_id="dashboard-layout", equal_height=True):
-            with gr.Column(scale=7, min_width=400):
+            with gr.Column(scale=7, min_width=400):  # noqa: SIM117
                 with gr.Group(elem_classes="dashboard-panel"):
                     gr.HTML(CHAT_HEADER_HTML)
                     chatbot = gr.Chatbot(
@@ -377,7 +384,7 @@ with gr.Blocks(title="NEXCEL Wind AI") as demo:
                             scale=1,
                         )
 
-            with gr.Column(scale=5, min_width=350):
+            with gr.Column(scale=5, min_width=350):  # noqa: SIM117
                 with gr.Group(elem_classes="dashboard-panel"):
                     gr.HTML(FORECAST_HEADER_HTML)
                     forecast_plot = gr.Plot(value=None, show_label=False, elem_id="forecast-plot")

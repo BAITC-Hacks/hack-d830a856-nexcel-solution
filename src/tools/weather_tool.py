@@ -139,7 +139,7 @@ class HistoricalWeatherService:
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
-            raise ValueError("Open-Meteo response must be a JSON object")
+            raise TypeError("Open-Meteo response must be a JSON object")
         return self._payload_to_frame(payload, turbine_id)
 
     @staticmethod
@@ -152,7 +152,7 @@ class HistoricalWeatherService:
 
         hourly = payload.get("hourly")
         if not isinstance(hourly, dict):
-            raise ValueError("Open-Meteo response has no hourly object")
+            raise TypeError("Open-Meteo response has no hourly object")
 
         missing = {"time", *WEATHER_VARIABLES}.difference(hourly)
         if missing:

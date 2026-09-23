@@ -19,16 +19,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in {None, ""}:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.tools.feature_tool import (  # noqa: E402
+from src.tools.feature_tool import (
     MODEL_FEATURE_COLUMNS,
     add_physical_features,
     select_model_features,
 )
-from src.tools.weather_tool import (  # noqa: E402
+from src.tools.weather_tool import (
     DEFAULT_CACHE_DIR,
     HistoricalWeatherService,
 )
-from src.train.build_train_set import (  # noqa: E402
+from src.train.build_train_set import (
     DEFAULT_TURBINE_1_PATH,
     DEFAULT_TURBINE_2_PATH,
     build_train_set,
