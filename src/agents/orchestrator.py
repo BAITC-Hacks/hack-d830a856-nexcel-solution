@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -8,6 +9,8 @@ from agents.tools import TOOL_SCHEMAS, get_weather_tool, run_model_tool
 
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
 SYSTEM_PROMPT = """Ты — диалоговый ассистент агентной системы прогнозирования выработки ветроэлектростанции (ВЭС) для трека "Энергетика" хакатона HackAlem AI.
@@ -65,14 +68,24 @@ class ForecastOrchestrator:
                 "run_model_tool": run_model_tool,
             }
             for tool_call in assistant_message.tool_calls:
+                tool_name = tool_call.function.name
                 try:
                     arguments = json.loads(tool_call.function.arguments or "{}")
-                    tool_functions[tool_call.function.name](**arguments)
+                    logging.info("tool_call name=%s args=%s", tool_name, arguments)
+                    tool_functions[tool_name](**arguments)
                     tool_result = "Инструмент выполнился без результата."
                 except NotImplementedError:
+                    # Ожидаемо: инструмент ещё не реализован (см. src/agents/tools.py).
                     tool_result = "Этот инструмент ещё не реализован"
-                except (KeyError, TypeError, json.JSONDecodeError):
-                    tool_result = "Этот инструмент ещё не реализован"
+                except KeyError:
+                    logging.exception("tool_call unknown tool name=%s", tool_name)
+                    tool_result = f"Ошибка: инструмент '{tool_name}' не найден"
+                except (TypeError, json.JSONDecodeError):
+                    # Реальный баг (не заглушка): либо LLM передал не те аргументы,
+                    # либо сама реализация инструмента сломана. Не путать с NotImplementedError.
+                    logging.exception("tool_call bad arguments name=%s raw=%s", tool_name, tool_call.function.arguments)
+                    tool_result = f"Ошибка вызова инструмента '{tool_name}': некорректные аргументы"
+                logging.info("tool_result name=%s result=%s", tool_name, tool_result)
 
                 messages.append(
                     {
@@ -90,4 +103,5 @@ class ForecastOrchestrator:
             )
             return final_response.choices[0].message.content or "Не удалось сформировать ответ."
         except OpenAIError:
+            logging.exception("OpenAI API call failed, falling back to demo response")
             return DEMO_RESPONSE

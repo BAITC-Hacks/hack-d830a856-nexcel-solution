@@ -1,6 +1,10 @@
+import logging
+
 import gradio as gr
 
 from agents.orchestrator import ForecastOrchestrator
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
 CUSTOM_CSS = r"""
@@ -323,6 +327,7 @@ def send_message(message: str, history: list):
     try:
         answer = orchestrator.chat(message, history[:-1])
     except Exception as error:
+        logging.exception("send_message failed")
         answer = f"Ошибка: {error}"
     history.append({"role": "assistant", "content": answer})
     return history, ""
