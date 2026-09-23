@@ -93,10 +93,9 @@ class AgentToolTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(result), {"value": 42})
 
-    def test_orchestrator_runs_weather_then_model(self) -> None:
-        """Exercise the full bounded loop without an API key or network."""
-        weather_result = {"weather_data": [{"timestamp": "2026-01-01T00:00:00Z"}]}
-        model_result = {"forecast": [{"predicted_power": 0.5}]}
+    def test_orchestrator_runs_forecast_cycle_tool(self) -> None:
+        """LLM calls one high-level tool; weather never travels through the LLM."""
+        cycle_result = {"status": "ok", "turbines": {"turbine_1": {"mean_power": 0.5}}}
         phase = {"value": 0}
 
         class FakeMessage:
@@ -116,26 +115,17 @@ class AgentToolTests(unittest.TestCase):
             phase["value"] += 1
             if value == 0:
                 call = SimpleNamespace(
-                    id="weather",
+                    id="forecast",
                     function=SimpleNamespace(
-                        name="get_weather_tool",
-                        arguments='{"turbine_id": 1, "target_date": "2026-01-01"}',
-                    ),
-                )
-                message = FakeMessage(tool_calls=[call])
-            elif value == 1:
-                messages = kwargs["messages"]
-                assert isinstance(messages, list)
-                weather = json.loads(messages[-1]["content"])
-                call = SimpleNamespace(
-                    id="model",
-                    function=SimpleNamespace(
-                        name="run_model_tool",
-                        arguments=json.dumps({"weather_data": weather["weather_data"]}),
+                        name="run_forecast_cycle",
+                        arguments='{"issue_date": "2026-01-31", "horizon_hours": 48, "turbine_ids": [1]}',
                     ),
                 )
                 message = FakeMessage(tool_calls=[call])
             else:
+                messages = kwargs["messages"]
+                assert isinstance(messages, list)
+                assert json.loads(messages[-1]["content"]) == cycle_result
                 message = FakeMessage(content="forecast complete")
             return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
@@ -144,23 +134,21 @@ class AgentToolTests(unittest.TestCase):
         )
         orchestrator = ForecastOrchestrator()
         orchestrator.client = client
-        with (
-            patch(
-                "src.agents.orchestrator.get_weather_tool",
-                return_value=weather_result,
-            ) as get_weather,
-            patch(
-                "src.agents.orchestrator.run_model_tool",
-                return_value=model_result,
-            ) as run_model,
-        ):
+        with patch(
+            "src.agents.orchestrator.run_forecast_cycle",
+            return_value=cycle_result,
+        ) as run_cycle:
             output = orchestrator._run_tool_loop(
                 [{"role": "user", "content": "forecast"}]
             )
 
         self.assertEqual(output, "forecast complete")
-        get_weather.assert_called_once()
-        run_model.assert_called_once_with(weather_data=weather_result["weather_data"])
+        run_cycle.assert_called_once_with(
+            orchestrator.agent,
+            issue_date="2026-01-31",
+            horizon_hours=48,
+            turbine_ids=[1],
+        )
 
 
 if __name__ == "__main__":
